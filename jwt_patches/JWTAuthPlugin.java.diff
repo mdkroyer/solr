@@ -1,0 +1,58 @@
+--- solr/solr/modules/jwt-auth/src/java/org/apache/solr/security/jwt/JWTAuthPlugin.java	2025-01-30 13:51:32.319021420 +0100
++++ patches/JWTAuthPlugin.java	2025-01-30 13:51:16.489824092 +0100
+@@ -591,15 +591,38 @@
+               for (Map.Entry<String, Pattern> entry : claimsMatchCompiled.entrySet()) {
+                 String claim = entry.getKey();
+                 if (jwtClaims.hasClaim(claim)) {
+-                  if (!entry.getValue().matcher(jwtClaims.getStringClaimValue(claim)).matches()) {
+-                    return new JWTAuthenticationResponse(
+-                        AuthCode.CLAIM_MISMATCH,
+-                        "Claim "
+-                            + claim
+-                            + "="
+-                            + jwtClaims.getStringClaimValue(claim)
+-                            + " does not match required regular expression "
+-                            + entry.getValue().pattern());
++                  Object claimValue = jwtClaims.getClaimValue(claim);
++                  if (claimValue instanceof List) {
++                    // Handle List claims (like groups_direct)
++                    boolean matchFound = false;
++                    List<?> claimList = (List<?>) claimValue;
++                    for (Object value : claimList) {
++                      if (value instanceof String
++                          && entry.getValue().matcher((String) value).matches()) {
++                        matchFound = true;
++                        break;
++                      }
++                    }
++                    if (!matchFound) {
++                      return new JWTAuthenticationResponse(
++                          AuthCode.CLAIM_MISMATCH,
++                          "No value in claim list "
++                              + claim
++                              + " matches required pattern "
++                              + entry.getValue().pattern());
++                    }
++                  } else {
++                    // Handle String claims (original behavior)
++                    if (!entry.getValue().matcher(jwtClaims.getStringClaimValue(claim)).matches()) {
++                      return new JWTAuthenticationResponse(
++                          AuthCode.CLAIM_MISMATCH,
++                          "Claim "
++                              + claim
++                              + "="
++                              + jwtClaims.getStringClaimValue(claim)
++                              + " does not match required pattern "
++                              + entry.getValue().pattern());
++                    }
+                   }
+                 } else {
+                   return new JWTAuthenticationResponse(
+@@ -690,6 +713,7 @@
+                 }
+               }
+             }
++
+             if (!finalRoles.isEmpty()) {
+               return new JWTAuthenticationResponse(
+                   AuthCode.AUTHENTICATED,

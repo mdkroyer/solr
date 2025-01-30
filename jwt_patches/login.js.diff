@@ -1,0 +1,183 @@
+--- solr/solr/webapp/web/js/angular/controllers/login.js	2025-01-22 11:07:09.363465646 +0100
++++ patches/login.js	2025-01-30 12:46:50.433900253 +0100
+@@ -94,6 +94,7 @@
+                     var idToken = response.id_token;
+                     var tokenType = response.access_type;
+                     sessionStorage.setItem("auth.realm", authRealm);
++                    sessionStorage.setItem("refresh_token", response.refresh_token);
+                     processTokensResponse(accessToken, idToken, tokenType, expectedState, hp);
+                 }).catch(function (error) {
+                   errorText += "Error calling token endpoint. ";
+@@ -110,6 +111,7 @@
+               }
+               else {
+                 // implicit flow
++                sessionStorage.setItem("refresh_token", response.refresh_token);
+                 processTokensResponse(hp['access_token'], hp['id_token'], hp['token_type'], expectedState, hp);
+               }
+             }
+@@ -148,7 +150,7 @@
+ 
+               if (errorText === "") {
+                 sessionStorage.setItem("auth.username", payload['sub']);
+-                sessionStorage.setItem("auth.header", "Bearer " + accessToken);
++                sessionStorage.setItem("auth.header", "Bearer " + idToken);
+                 sessionStorage.removeItem("auth.statusText");
+                 sessionStorage.removeItem("auth.stateRandom");
+                 sessionStorage.removeItem("auth.wwwAuthHeader");
+@@ -158,6 +160,24 @@
+                 sessionStorage.setItem("auth.state", "authenticated");
+                 sessionStorage.removeItem("http401");
+                 sessionStorage.setItem("auth.scheme", "Bearer");
++
++                // Fixes:
++                sessionStorage.setItem("access_token", accessToken);
++                sessionStorage.setItem("id_token", idToken);
++                
++                // Extract expiry time from ID Token
++                const tokenExpiry = getIdTokenExpiry(idToken);
++                if (tokenExpiry) {
++                    sessionStorage.setItem("token_expiry", tokenExpiry);
++                    console.log("✅ Token expires at:", new Date(tokenExpiry).toLocaleString());
++                } else {
++                  console.warn("⚠️ Could not determine token expiry, defaulting to 5 minutes.");
++                    sessionStorage.setItem("token_expiry", Date.now() + 3600); // Default: 5 Minutes
++                }
++
++                // Schedule automatic refresh
++                scheduleTokenRefresh();
++
+                 $location.path(redirectTo).hash("");
+               }
+             } else {
+@@ -168,8 +188,8 @@
+             console.error("Callback was missing the id_token parameter, could not validate nonce.");
+             errorText += "Callback was missing the id_token parameter, could not validate nonce. ";
+           }
+-          if (accessToken.split(".").length !== 3) {
+-            console.error("Expected JWT compact access_token param but got " + accessToken);
++          if (idToken.split(".").length !== 3) {
++            console.error("Expected JWT compact access_token param but got " + idToken);
+             errorText += "Invalid values in access_token parameter. ";
+           }
+           if (errorText !== "") {
+@@ -214,6 +234,102 @@
+         }
+       }
+ 
++      function getIdTokenExpiry(idToken) {
++        if (!idToken) {
++            console.warn("⚠️ ID Token is missing.");
++            return null;
++        }
++
++        try {
++            const parts = idToken.split(".");
++            if (parts.length !== 3) {
++                throw new Error("Invalid JWT format.");
++            }
++    
++            // Decode Base64 URL payload
++            const payload = JSON.parse(atob(parts[1]));
++    
++            // Extract expiration timestamp (exp)
++            if (!payload.exp) {
++                throw new Error("❌ No 'exp' claim in ID Token.");
++            }
++    
++            return payload.exp * 1000; // Convert seconds to milliseconds
++        } catch (error) {
++            console.error("❌ Failed to extract expiry from ID Token:", error);
++            return null;
++        }
++      }
++
++      async function refreshToken() {
++        const refreshToken = sessionStorage.getItem("refresh_token");
++        if (!refreshToken) {
++            console.warn("⚠️ No refresh token available. User needs to reauthenticate.");
++            $location.path("/");
++            return;
++        }
++    
++        const tokenEndpoint = $scope.authData['tokenEndpoint']; // Ensure this is correct
++        const clientId = $scope.authData['client_id']; // Replace with actual client ID
++    
++        const data = new URLSearchParams({
++            "grant_type": "refresh_token",
++            "refresh_token": refreshToken,
++            "client_id": clientId
++        });
++    
++        try {
++            const response = await fetch(tokenEndpoint, {
++                method: "POST",
++                headers: { "Content-Type": "application/x-www-form-urlencoded" },
++                body: data
++            });
++    
++            if (!response.ok) {
++                throw new Error(`❌ Token refresh failed: ${response.statusText}`);
++            }
++
++            const tokenData = await response.json();
++            if (!tokenData.access_token) {
++                throw new Error("❌ Invalid token response from GitLab.");
++            }
++    
++            // Store new tokens
++            sessionStorage.setItem("access_token", tokenData.access_token);
++            sessionStorage.setItem("id_token", tokenData.id_token || "");
++            sessionStorage.setItem("refresh_token", tokenData.refresh_token || refreshToken);
++            sessionStorage.setItem("token_expiry", getIdTokenExpiry(tokenData.id_token));
++            sessionStorage.setItem("auth.header", "Bearer " + tokenData.id_token);
++    
++            console.log("✅ Token successfully refreshed.");
++    
++            // Reschedule token refresh
++            scheduleTokenRefresh();
++        } catch (error) {
++            console.error("❌ Token refresh error:", error);
++            $location.path("/"); // Log out user if refresh fails
++        }
++      }
++
++      function scheduleTokenRefresh() {
++        const tokenExpiry = sessionStorage.getItem("token_expiry");
++        if (!tokenExpiry) {
++            console.warn("⚠️ No token expiry time found.");
++            return;
++        }
++    
++        const expiresInMs = tokenExpiry - Date.now();
++        const refreshTime = expiresInMs / 4; // Refresh 1 minute before expiry
++    
++        if (refreshTime <= 0) {
++            console.warn("⚠️ Token already expired, refreshing now.");
++            refreshToken();
++        } else {
++            console.log(`🔄 Scheduling token refresh in ${refreshTime / 1000} seconds.`);
++            setTimeout(refreshToken, refreshTime);
++        }
++      }
++
+         if (errorText === "" && !$scope.error && authParams) {
+           $scope.error = authParams['error'];
+           $scope.errorDescription = authParams['error_description'];
+@@ -292,11 +408,11 @@
+           function paramsToString(params) {
+             var arr = [];
+             for (var p in params) {
+-               if( params.hasOwnProperty(p) ) {
+-                 arr.push(p + "=" + encodeURIComponent(params[p]));
+-               }
+-             }
+-             return arr.join("&");
++              if( params.hasOwnProperty(p) ) {
++                arr.push(p + "=" + encodeURIComponent(params[p]));
++              }
++            }
++            return arr.join("&");
+           }
+         };
+ 
